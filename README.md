@@ -34,8 +34,6 @@ I built the model, pretrained it on a web text corpus, then did supervised fine-
 
 ## Project Structure
 
-> File names may vary slightly depending on your clone of the starter code, but conceptually this is the layout.
-
 - `gpt.py`  
   Core model:
   - Embeddings
