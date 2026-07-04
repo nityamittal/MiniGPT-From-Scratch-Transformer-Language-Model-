@@ -35,11 +35,10 @@ import gzip
 # PyTorch imports
 import torch
 import torch.nn as nn
-import torch.functional as F
+import torch.nn.functional as F
 from torch.nn import RMSNorm
 from torch.amp import autocast, GradScaler
 from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
 
 # Transformers and tokenization
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup, default_data_collator
@@ -69,19 +68,19 @@ def parse_args():
 
     # Data arguments
     parser.add_argument('--train_data_path', type=str,
-                       default='/shared/0/projects/teaching/eecs595/data/smol-smoltalk-train.jsonl.gz',
+                       default='data/smol-smoltalk-train.jsonl.gz',
                        help='Path to training data')
     parser.add_argument('--train_data_format', type=str, choices=['jsonl', 'arrow'], default='jsonl',
                        help='Format of training data: jsonl (for .jsonl/.gz files) or arrow (for arrow datasets)')
     parser.add_argument('--val_data_format', type=str, choices=['jsonl', 'arrow'], default='jsonl',
                        help='Format of validation data: jsonl (for .jsonl/.gz files) or arrow (for arrow datasets)')
     parser.add_argument('--model_path', type=str,
-                       default='/shared/0/projects/teaching/eecs595/models/pico-gpt/pretrained-models/gpt.1B-18000-step.model.pth',
+                       default='models/pretrained/gpt.1B-18000-step.model.pth',
                        help='Path to pre-trained model')
 
     # Validation arguments
     parser.add_argument('--val_data_path', type=str,
-                       default='/shared/0/projects/teaching/eecs595/data/smol-smoltalk-dev.jsonl.gz',
+                       default='data/smol-smoltalk-dev.jsonl.gz',
                        help='Path to validation data')
     parser.add_argument('--eval_max_docs', type=int, default=None,
                        help='Maximum number of documents to load for validation (only for raw text)')
@@ -131,7 +130,7 @@ def parse_args():
 
     # Logging and saving
     parser.add_argument('--output_dir', type=str,
-                       default='/shared/0/projects/teaching/eecs595/models/pico-gpt/sft-models/',
+                       default='models/sft/',
                        help='Output directory for models')
     parser.add_argument('--save_every', type=int, default=1000,
                        help='Save model every N steps')
@@ -191,29 +190,10 @@ def create_model_config(args, vocab_size):
 
 def load_model(model_path, config):
     """Load pre-trained model."""
-    print(f"Loading pre-trained model from {model_path}...")
-    state_dict = torch.load(model_path, map_location='cpu')
-
-    # Create model with correct configuration
-    model = gpt.GPTModel(config)
-
-    # Check vocabulary size compatibility
-    original_vocab_size = state_dict['embedding.token_embeddings.weight'].shape[0]
-    new_vocab_size = config['vocab_size']
-
-    if original_vocab_size != new_vocab_size:
-        print(f"❌ ERROR: Vocabulary size mismatch!")
-        print(f"   Model vocab size: {original_vocab_size}")
-        print(f"   Expected vocab size: {new_vocab_size}")
-        raise ValueError("Vocabulary size mismatch - use the corrected model")
-    else:
-        print(f"✅ Vocabulary sizes match: {original_vocab_size}")
-
-    # Load the state dict
-    model.load_state_dict(state_dict, strict=False)
-    print(f"✅ Model loaded successfully!")
-
-    return model
+    # Delegates to sft.load_pretrained_model, which handles both raw state
+    # dicts and pretraining wrapper checkpoints, strips torch.compile
+    # prefixes, and loads strictly.
+    return sft.load_pretrained_model(model_path, config)
 
 
 def create_dataloaders(args, tokenizer):
@@ -272,26 +252,39 @@ def train_model(model, train_loader, val_loader, args, device):
 
     # Move model to device
     model = model.to(device)
+    # Save the underlying module, not the torch.compile wrapper — the wrapper
+    # prefixes every state-dict key with `_orig_mod.`, which breaks reloading.
+    model_to_save = gpt.unwrap_compiled(model)
 
     # Loss function - automatically ignores -100 labels
     loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
 
-    # Optimizer
+    # Optimizer (no weight decay on norm scales, biases, or the tied embedding)
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        gpt.get_optimizer_param_groups(model, args.weight_decay),
         lr=args.learning_rate,
-        weight_decay=args.weight_decay,
         betas=(0.9, 0.95)
     )
 
-    # Learning rate scheduler
-    total_steps = len(train_loader) * args.max_epochs // args.gradient_accumulation_steps
+    # Learning rate scheduler. The optimizer also steps on the (possibly
+    # partial) final accumulation group of each epoch, so count with ceil.
+    steps_per_epoch = math.ceil(len(train_loader) / args.gradient_accumulation_steps)
+    total_steps = steps_per_epoch * args.max_epochs
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=args.warmup_steps,
         num_training_steps=total_steps,
         num_cycles=0.5
     )
+
+    # Mixed precision setup. A loss scaler is only needed (and only
+    # supported) for float16 on CUDA; bfloat16 needs no scaler.
+    device_type = str(device).split(':')[0]
+    if device_type == "cuda":
+        amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    else:
+        amp_dtype = torch.float32
+    scaler = GradScaler(enabled=(device_type == "cuda" and amp_dtype == torch.float16))
 
     # Training tracking
     train_losses = []
@@ -318,6 +311,9 @@ def train_model(model, train_loader, val_loader, args, device):
 
     for epoch in trange(args.max_epochs, desc="Epoch"):
         epoch_losses = []
+        running_loss = 0.0
+        running_batches = 0
+        num_batches = len(train_loader)
 
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
 
@@ -359,8 +355,7 @@ def train_model(model, train_loader, val_loader, args, device):
             input_ids = input_ids.to(device)
             labels = labels.to(device)
 
-            if device == "cuda":
-                amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+            if device_type == "cuda":
                 with autocast(device_type="cuda", dtype=amp_dtype):
                     logits = model(input_ids)  # [B, T, V]
 
@@ -378,7 +373,15 @@ def train_model(model, train_loader, val_loader, args, device):
                 loss = loss_fn(
                     shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1),)
 
-            loss = loss / args.gradient_accumulation_steps
+            # Size of the current accumulation group (the last group of an
+            # epoch may be smaller; dividing by the full accumulation count
+            # would under-weight it).
+            accum_steps = args.gradient_accumulation_steps
+            group_start = (batch_idx // accum_steps) * accum_steps
+            group_size = min(accum_steps, num_batches - group_start)
+
+            unscaled_loss = loss.item()
+            loss = loss / group_size
 
 
 
@@ -408,22 +411,26 @@ def train_model(model, train_loader, val_loader, args, device):
 
             # code goes here
 
-            accum_steps = args.gradient_accumulation_steps
-
-            if batch_idx == 0:
-                running_loss = 0.0
-                running_batches = 0
-
-            running_loss += loss.item() * accum_steps
+            running_loss += unscaled_loss
             running_batches += 1
 
-            loss.backward()
-            is_accum_step = ((batch_idx + 1) % accum_steps == 0) or (batch_idx + 1 == len(train_loader))
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+            is_accum_step = ((batch_idx + 1) % accum_steps == 0) or (batch_idx + 1 == num_batches)
 
             if is_accum_step:
+                if scaler.is_enabled():
+                    scaler.unscale_(optimizer)
+
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
 
-                optimizer.step()
+                if scaler.is_enabled():
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
@@ -443,7 +450,7 @@ def train_model(model, train_loader, val_loader, args, device):
                         "lr": scheduler.get_last_lr()[0],
                         "opt_step": opt_step,
                         "global_step": global_step,
-                        "epoch": epoch + (batch_idx + 1) / len(train_loader),
+                        "epoch": epoch + (batch_idx + 1) / num_batches,
                     },
                     step=global_step,
                 )
@@ -470,7 +477,7 @@ def train_model(model, train_loader, val_loader, args, device):
                         args.output_dir,
                         f"sft_checkpoint_step_{global_step}.pth",
                     )
-                    torch.save(model.state_dict(), ckpt_path)
+                    torch.save(model_to_save.state_dict(), ckpt_path)
                     print(f"Saved checkpoint: {ckpt_path}")
                     last_save_step = global_step
 
@@ -507,13 +514,13 @@ def train_model(model, train_loader, val_loader, args, device):
             args.output_dir,
             f"sft_epoch_{epoch + 1}.pth",
         )
-        torch.save(model.state_dict(), epoch_ckpt_path)
+        torch.save(model_to_save.state_dict(), epoch_ckpt_path)
         print(f"Saved end-of-epoch checkpoint: {epoch_ckpt_path}")
 
 
     # code goes here
     final_model_path = os.path.join(args.output_dir, "sft_final_model.pth")
-    torch.save(model.state_dict(), final_model_path)
+    torch.save(model_to_save.state_dict(), final_model_path)
     print(f"Saved final SFT model to {final_model_path}")
 
 
@@ -540,19 +547,6 @@ def main():
     config = create_model_config(args, vocab_size)
 
     ###########################################################################
-    #                            TODO 4.4: YOUR CODE HERE                     #
-    #                                                                         #
-    # Implement model loading and setup:                                      #
-    #                                                                         #
-    # 1. Load pre-trained GPT model from checkpoint                           #
-    # 2. Move model to the correct device (CPU/GPU)                           #
-    # 3. Optionally compile model for better performance                      #
-    # 4. Verify model is ready for SFT training                               #
-    #                                                                         #
-    # This ensures your pre-trained model is properly loaded!                 #
-    ###########################################################################
-
-        ###########################################################################
     #                            TODO 4.4: YOUR CODE HERE                     #
     #                                                                         #
     # Implement model loading and setup:                                      #

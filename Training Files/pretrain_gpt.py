@@ -73,7 +73,7 @@ def parse_args():
 
     # Data arguments
     parser.add_argument('--data_path', type=str,
-                       default='/shared/0/projects/teaching/eecs595/data/fineweb-edu-sample-1B.jsonl.gz',
+                       default='data/fineweb-edu-sample-1B.jsonl.gz',
                        help='Path to the training data (JSONL.gz file or Arrow dataset directory)')
     parser.add_argument('--data_format', type=str, choices=['jsonl', 'arrow'], default='jsonl',
                        help='Format of training data: jsonl (for .jsonl/.gz files) or arrow (for arrow datasets)')
@@ -121,7 +121,7 @@ def parse_args():
 
     # Logging and saving
     parser.add_argument('--output_dir', type=str,
-                       default='/shared/0/projects/teaching/eecs595/models/pico-gpt/pretrained-models/',
+                       default='models/pretrained/',
                        help='Output directory for saving models')
     parser.add_argument('--save_every', type=int, default=1000,
                        help='Save model every N steps')
@@ -242,19 +242,27 @@ def create_dataloaders(docs, tokenizer, config, args):
 
     # Your Code here
     if getattr(args, "data_format", "jsonl") == "arrow":
-        train_loader = gpt.create_dataloader(arrow_dataset_path=args.data_path, batch_size=args.batch_size, 
-                                             max_length=config.get("context_length", 1024), shuffle=True, drop_last=True, 
-                                             num_workers=args.num_workers,)
+        full_dataset = gpt.GPTArrowDataset(args.data_path)
+
+        # Hold out 5% for validation — evaluating on the training data itself
+        # cannot detect overfitting.
+        n_total = len(full_dataset)
+        n_val = max(1, int(0.05 * n_total))
+        n_train = n_total - n_val
+        generator = torch.Generator().manual_seed(args.seed)
+        train_dataset, val_dataset = torch.utils.data.random_split(
+            full_dataset, [n_train, n_val], generator=generator
+        )
+
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
+                                  drop_last=True, num_workers=args.num_workers,)
 
         eval_bs = getattr(args, "eval_batch_size", args.batch_size)
-        val_loader = gpt.create_dataloader(arrow_dataset_path=args.data_path, batch_size=eval_bs,
-                                           max_length=config.get("context_length", 1024), shuffle=False,
-                                           drop_last=False, num_workers=args.num_workers,)
+        val_loader = DataLoader(val_dataset, batch_size=eval_bs, shuffle=False,
+                                drop_last=False, num_workers=args.num_workers,)
 
-
-        num_sequences = len(train_loader.dataset)
         print(f"Arrow dataset loaded from: {args.data_path}")
-        print(f"Total packed sequences: {num_sequences}")
+        print(f"Total packed sequences: {n_total} (train={n_train}, val={n_val})")
         print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
 
     else:
@@ -337,6 +345,10 @@ def evaluate_validation_loss(model, val_loader, loss_fn, device, max_docs=None):
     total_tokens = 0
     num_batches = 0
 
+    device_type = str(device).split(':')[0]
+    use_autocast = device_type != "cpu"
+    amp_dtype = get_amp_dtype(device_type)
+
     with torch.no_grad():
         for batch_idx, (input_ids, labels) in enumerate(val_loader):
             if max_docs is not None and batch_idx >= max_docs:
@@ -345,9 +357,13 @@ def evaluate_validation_loss(model, val_loader, loss_fn, device, max_docs=None):
             input_ids = input_ids.to(device)
             labels = labels.to(device)
 
-            logits = model(input_ids)
-
-            loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
+            if use_autocast:
+                with autocast(device_type=device_type, dtype=amp_dtype):
+                    logits = model(input_ids)
+                    loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
+            else:
+                logits = model(input_ids)
+                loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
 
             batch_tokens = labels.numel()
             total_loss += loss.item() * batch_tokens
@@ -366,25 +382,26 @@ def evaluate_validation_loss(model, val_loader, loss_fn, device, max_docs=None):
 def train_model(model, train_loader, val_loader, config, args, resume_state=None):
     """Train the GPT model."""
     device = get_device(args.device)
-    amp_dtype = get_amp_dtype(device)
+    device_type = str(device).split(':')[0]
+    amp_dtype = get_amp_dtype(device_type)
     print(f"Using device: {device}")
 
-    use_autocast = device != "cpu"
+    use_autocast = device_type != "cpu"
 
     # Move model to device
     model.to(device)
-    model_to_save = model._orig_mod if hasattr(model, "_orig_mod") else model
+    model_to_save = gpt.unwrap_compiled(model)
 
 
     # Initialize training components
     loss_fn = nn.CrossEntropyLoss()
 
+    # No weight decay on norm scales, biases, or the tied embedding
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        gpt.get_optimizer_param_groups(model, args.weight_decay),
         lr=args.learning_rate,
         betas=(0.9, 0.95),
         eps=1e-8,
-        weight_decay=args.weight_decay,
     )
 
     # Creates a learning rate scheduler that first linearly increases the learning rate ("warmup")
@@ -420,19 +437,21 @@ def train_model(model, train_loader, val_loader, config, args, resume_state=None
         num_cycles=0.5,  # half-cosine
     )
 
-    scaler = GradScaler(enabled=(device.startswith("cuda") or device == "mps"))
+    # Loss scaling is only needed (and only supported) for float16 on CUDA;
+    # bfloat16 has enough dynamic range and needs no scaler.
+    scaler = GradScaler(enabled=(device_type == "cuda" and amp_dtype == torch.float16))
 
     opt_step = 0
     global_step = 0
     start_epoch = 0
 
     if resume_state is not None:
-        if resume_state.get("optimizer_state_dict") is not None:
+        if resume_state.get("optimizer") is not None:
             print("Loading optimizer state from checkpoint...")
-            optimizer.load_state_dict(resume_state["optimizer_state_dict"])
-        if resume_state.get("scheduler_state_dict") is not None:
+            optimizer.load_state_dict(resume_state["optimizer"])
+        if resume_state.get("scheduler") is not None:
             print("Loading scheduler state from checkpoint...")
-            scheduler.load_state_dict(resume_state["scheduler_state_dict"])
+            scheduler.load_state_dict(resume_state["scheduler"])
 
         global_step = resume_state.get("step", 0)
         opt_step = global_step
@@ -533,34 +552,42 @@ def train_model(model, train_loader, val_loader, config, args, resume_state=None
 
     for epoch in trange(start_epoch, args.max_epochs, desc="Epoch"):
 
-        running_loss = 0.0
+        running_loss = torch.zeros((), device=device)
         running_batches = 0
 
         print(f"Starting epoch {epoch}")
+        num_batches = len(train_loader)
         for step, (input_ids, labels) in enumerate(tqdm(train_loader, position=1, leave=True, desc="Step")):
-            print(f"  entered batch loop, step {step}")
             input_ids = input_ids.to(device)
             labels = labels.to(device)
 
             if use_autocast:
-                with autocast(device_type=device, dtype=amp_dtype):
+                with autocast(device_type=device_type, dtype=amp_dtype):
                     logits = model(input_ids)
                     loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
             else:
                 logits = model(input_ids)
                 loss = loss_fn(logits.view(-1, logits.size(-1)), labels.view(-1))
 
-            running_loss += loss.item()
+            # Accumulate on-device; calling .item() every micro-batch forces a
+            # GPU sync per step.
+            running_loss += loss.detach()
             running_batches += 1
 
-            loss_to_backward = loss / accum
+            # Size of the current accumulation group (the last group of an
+            # epoch may be smaller than `accum`; dividing by the full `accum`
+            # would under-weight it).
+            group_start = (step // accum) * accum
+            group_size = min(accum, num_batches - group_start)
+
+            loss_to_backward = loss / group_size
 
             if scaler.is_enabled():
                 scaler.scale(loss_to_backward).backward()
             else:
                 loss_to_backward.backward()
 
-            is_accum_step = ((step + 1) % accum == 0) or (step + 1 == len(train_loader))
+            is_accum_step = ((step + 1) % accum == 0) or (step + 1 == num_batches)
 
             if is_accum_step:
                 if scaler.is_enabled():
@@ -581,10 +608,10 @@ def train_model(model, train_loader, val_loader, config, args, resume_state=None
                 opt_step += 1
                 global_step += 1
 
-                avg_loss = running_loss / max(1, running_batches)
+                avg_loss = (running_loss / max(1, running_batches)).item()
                 losses.append(avg_loss)
 
-                running_loss = 0.0
+                running_loss = torch.zeros((), device=device)
                 running_batches = 0
 
                 wandb.log(
@@ -700,7 +727,7 @@ def main():
     resume_state = None
     if args.resume_from is not None:
         print(f"Resuming from checkpoint: {args.resume_from}")
-        ckpt = torch.load(args.resume_from, map_location="cpu")
+        ckpt = torch.load(args.resume_from, map_location="cpu", weights_only=True)
         resume_state = {
             "model": ckpt.get("model_state_dict"),
             "optimizer": ckpt.get("optimizer_state_dict"),
@@ -736,7 +763,7 @@ def main():
     # If resuming, load model weights before compile
     if resume_state is not None and resume_state["model"] is not None:
         print("Loading model weights from checkpoint...")
-        model.load_state_dict(resume_state["model"])
+        model.load_state_dict(gpt.strip_compiled_prefix(resume_state["model"]))
 
     # Compile (GPU) or skip (CPU), as you already do
     device_for_compile = get_device(args.device)

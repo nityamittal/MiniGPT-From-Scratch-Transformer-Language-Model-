@@ -20,11 +20,11 @@ import gzip
 # PyTorch imports
 import torch
 import torch.nn as nn
-import torch.functional as F
+import torch.nn.functional as F
 from torch.nn import RMSNorm
 from torch.amp import autocast, GradScaler
 from torch.utils.data import Dataset, DataLoader
-import torch.nn.functional as F
+from functools import partial
 
 # Transformers and tokenization
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup, default_data_collator
@@ -48,7 +48,8 @@ from gpt import (
     GPTModel,
     generate_new_tokens,
     generate_text,
-    setup_tokenizer
+    setup_tokenizer,
+    strip_compiled_prefix,
 )
 
 
@@ -164,8 +165,13 @@ class SFTDataset(Dataset):
                 break
 
             if len(seg_ids) > remaining:
+                # Truncate, but keep <|end|> as the final token so the model
+                # still learns that every segment terminates — otherwise
+                # truncated assistant turns teach it to never emit <|end|>.
                 seg_ids = seg_ids[:remaining]
                 seg_labels = seg_labels[:remaining]
+                seg_ids[-1] = self.SID["end"]
+                seg_labels[-1] = self.SID["end"] if train_segment else -100
 
             ids.extend(seg_ids)
             labels.extend(seg_labels)
@@ -186,12 +192,14 @@ class SFTDataset(Dataset):
 # Data Collators
 # =============================================================================
 
-def sft_data_collator(batch):
+def sft_data_collator(batch, pad_token_id: int = 0):
     """
     Custom data collator for SFT dataset that handles tuple format.
 
     Args:
         batch: List of (input_ids, labels) tuples
+        pad_token_id: Token ID used to right-pad input_ids (pass the
+            tokenizer's actual pad token id, e.g. via functools.partial)
 
     Returns:
         Dictionary with batched input_ids and labels
@@ -216,7 +224,6 @@ def sft_data_collator(batch):
 
     max_len = max(t.size(0) for t in input_ids_list)
 
-    pad_token_id = 0
     pad_label_id = -100
 
     padded_inputs = []
@@ -274,10 +281,13 @@ def hf_collate(examples):
         - labels: Tensor of shape (batch_size, max_length)
         - attention_mask: Tensor indicating non-padding tokens
     """
-    pad_id = 0  # Default pad token ID
     ids = torch.tensor(np.stack([e["input_ids"] for e in examples]), dtype=torch.long)
     labs = torch.tensor(np.stack([e["labels"] for e in examples]), dtype=torch.long)
-    attn = (ids != pad_id).to(torch.long)
+    # Packed sequences contain no padding, so the mask is all ones. Deriving
+    # it from `ids != 0` would mislabel genuine tokens with id 0 ("!") as
+    # padding. Note: GPTModel does not consume this mask; it is provided for
+    # compatibility with HF-style training loops only.
+    attn = torch.ones_like(ids)
     return {"input_ids": ids, "labels": labs, "attention_mask": attn}
 
 
@@ -433,7 +443,14 @@ def load_pretrained_model(model_path: str, config: Dict[str, Any]):
         Loaded GPT model
     """
     print(f"Loading pre-trained model from {model_path}...")
-    state_dict = torch.load(model_path, map_location='cpu')
+    state_dict = torch.load(model_path, map_location='cpu', weights_only=True)
+
+    # Accept both raw state dicts and the wrapper dicts saved by the
+    # pretraining script ({"model_state_dict": ..., "optimizer_state_dict": ...}).
+    if "model_state_dict" in state_dict:
+        state_dict = state_dict["model_state_dict"]
+    # Handle checkpoints accidentally saved from a torch.compile'd model
+    state_dict = strip_compiled_prefix(state_dict)
 
     # Create model with correct configuration
     model = GPTModel(config)
@@ -449,8 +466,9 @@ def load_pretrained_model(model_path: str, config: Dict[str, Any]):
         print(f"   Please use the corrected model from the pre-training notebook!")
         raise ValueError("Vocabulary size mismatch - use the corrected model")
 
-    # Load the state dict
-    model.load_state_dict(state_dict, strict=False)
+    # Load the state dict strictly — a silent partial load would leave the
+    # model randomly initialized while reporting success.
+    model.load_state_dict(state_dict, strict=True)
     print(f"✅ Model loaded successfully!")
     print(f"✅ Model vocabulary size: {model.embedding.token_embeddings.weight.shape[0]}")
 
@@ -633,13 +651,14 @@ def create_sft_dataloader(data_file: str, tokenizer, batch_size: int = 16,
             max_length=max_length,
         )
 
+        pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
         dataloader = DataLoader(
             dataset,
             batch_size=batch_size,
             shuffle=shuffle,
             drop_last=drop_last,
             num_workers=num_workers,
-            collate_fn=sft_data_collator,
+            collate_fn=partial(sft_data_collator, pad_token_id=pad_id),
         )
 
         print(
