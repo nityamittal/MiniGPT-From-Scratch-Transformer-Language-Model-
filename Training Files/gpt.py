@@ -592,11 +592,15 @@ def generate_new_tokens(model, idx, max_new_tokens, context_size, temperature=1.
             logits = model(idx_cond)
 
         logits = logits[:, -1, :]  # Final token in the sequence
-        logits = logits / temperature  # Apply temperature
 
-        probas = torch.softmax(logits, dim=-1)
-        # Sample from the distribution rather than argmax for more natural randomness
-        idx_next = torch.multinomial(probas, num_samples=1)
+        if temperature <= 0:
+            # Greedy decoding; avoids division by zero
+            idx_next = torch.argmax(logits, dim=-1, keepdim=True)
+        else:
+            logits = logits / temperature  # Apply temperature
+            probas = torch.softmax(logits, dim=-1)
+            # Sample from the distribution rather than argmax for more natural randomness
+            idx_next = torch.multinomial(probas, num_samples=1)
         # Keep new token on the same device as the running sequence to avoid device mismatch
         idx_next = idx_next.to(idx.device)
         idx = torch.cat((idx, idx_next), dim=1)
@@ -669,30 +673,30 @@ class GPTDataset(Dataset):
         self.max_length = max_length
         self.stride = stride
 
-        self.input_ids: List[torch.Tensor] = []
-        self.target_ids: List[torch.Tensor] = []
-
-        full_text = "\n\n".join(docs)
-        token_ids = self.tokenizer.encode(full_text)
+        # Tokenize per-document (avoids building one giant string, which
+        # exhausts memory on large corpora) and separate documents with the
+        # tokenizer's EOS token so the model doesn't learn spurious
+        # cross-document continuations.
+        eos_id = tokenizer.eos_token_id
+        token_ids: List[int] = []
+        for doc in tqdm(docs, desc="Tokenizing documents"):
+            token_ids.extend(tokenizer.encode(doc))
+            if eos_id is not None:
+                token_ids.append(eos_id)
 
         n_tokens = len(token_ids)
         print(f"[GPTDataset] n_tokens={n_tokens}, max_length={max_length}, stride={stride}")
-        
-        for i in range(0, n_tokens - max_length, stride):
-            in_slice = token_ids[i : i + max_length]
-            tgt_slice = token_ids[i + 1 : i + max_length + 1]
 
-            if len(in_slice) == max_length and len(tgt_slice) == max_length:
-                in_tensor = torch.tensor(in_slice, dtype=torch.long)
-                tgt_tensor = torch.tensor(tgt_slice, dtype=torch.long)
-                self.input_ids.append(in_tensor)
-                self.target_ids.append(tgt_tensor)
+        # Store one flat tensor and slice windows on demand in __getitem__,
+        # instead of materializing every (overlapping) window up front.
+        self.token_ids = torch.tensor(token_ids, dtype=torch.long)
+        self.window_starts = list(range(0, n_tokens - max_length, stride))
 
-        print(f"[GPTDataset] built {len(self.input_ids)} sequences")
+        print(f"[GPTDataset] built {len(self.window_starts)} sequences")
 
 
     def __len__(self):
-        return len(self.input_ids)
+        return len(self.window_starts)
 
     def __getitem__(self, idx):
         """
@@ -707,7 +711,10 @@ class GPTDataset(Dataset):
         #                     TODO 1.13: YOUR CODE HERE                     #
         # Return the input and target tensors for the given index      #
         ################################################################
-        return self.input_ids[idx], self.target_ids[idx]
+        i = self.window_starts[idx]
+        inputs = self.token_ids[i : i + self.max_length]
+        targets = self.token_ids[i + 1 : i + self.max_length + 1]
+        return inputs, targets
 
 
 class GPTArrowDataset(Dataset):
@@ -811,6 +818,41 @@ def create_dataloader(txt=None, arrow_dataset_path=None, batch_size=16, max_leng
 # Utility Functions
 # =============================================================================
 
+def get_optimizer_param_groups(model: nn.Module, weight_decay: float):
+    """
+    Split model parameters into decay / no-decay groups for AdamW.
+
+    Weight decay should not be applied to norm scales, biases, or the
+    (tied) token embedding — only to the 2D projection matrices.
+    """
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.dim() < 2 or "token_embeddings" in name:
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    return [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+
+
+def unwrap_compiled(model: nn.Module) -> nn.Module:
+    """Return the underlying module if `model` was wrapped by torch.compile."""
+    return getattr(model, "_orig_mod", model)
+
+
+def strip_compiled_prefix(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip the `_orig_mod.` prefix torch.compile adds to state-dict keys."""
+    prefix = "_orig_mod."
+    if any(k.startswith(prefix) for k in state_dict):
+        return {k[len(prefix):] if k.startswith(prefix) else k: v
+                for k, v in state_dict.items()}
+    return state_dict
+
+
 def setup_tokenizer():
     """
     Load GPT-2 tokenizer and add special tokens.
@@ -847,7 +889,12 @@ def setup_tokenizer():
     if add_tokens:
         tokenizer.add_special_tokens(add_tokens)
 
-    tokenizer.padding_side = "left"
+    # Right padding matches the collators in this project (they right-pad) and
+    # is safe with a causal mask: earlier real tokens can never attend to the
+    # padding that follows them. Left padding would put pad tokens *before*
+    # the real content, which this model cannot mask out (its forward pass
+    # takes no attention mask), so it must be avoided.
+    tokenizer.padding_side = "right"
 
     _ = tokenizer("Example: <|system|> You are a system. "
                            "<|user|> Hi. <|assistant|> Hello. <|end|>")

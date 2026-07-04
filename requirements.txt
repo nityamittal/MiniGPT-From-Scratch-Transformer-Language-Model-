@@ -1,0 +1,9 @@
+# torch>=2.4 is required for torch.nn.RMSNorm
+torch>=2.4
+transformers>=4.40
+datasets>=2.19
+numpy
+tqdm
+orjson
+wandb
+matplotlib

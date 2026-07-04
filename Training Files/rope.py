@@ -32,7 +32,9 @@ class Rotary(torch.nn.Module):
         inv_freq = 1.0 / (self.base ** (torch.arange(0, half, dtype=torch.float32) / half))
         t = torch.arange(self.max_seq_len, dtype=torch.float32)          # [S]
         freqs = t[:, None] * inv_freq[None, :]                            # [S, half]
-        emb = torch.repeat_interleave(freqs, 2, dim=-1)                   # [S, D]
+        # Half-split layout: dims [0:half) and [half:D) share the same angles,
+        # matching the rotate-half pairing used in apply_rotary_pos_emb.
+        emb = torch.cat((freqs, freqs), dim=-1)                            # [S, D]
         cos_base = emb.cos()                                              # [S, D] fp32
         sin_base = emb.sin()
 
