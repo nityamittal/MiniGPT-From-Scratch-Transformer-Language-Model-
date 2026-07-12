@@ -1,10 +1,9 @@
 """
-EECS 595 HW3: GPT Implementation
+GPT-style decoder-only language model (RoPE, SwiGLU, RMSNorm).
 
-This file contains all the core classes and functions needed to implement a GPT-style
-decoder language model using more recent techniques (e.g., RoPE, SwiGLU, etc.).
+Core model implementation: embeddings, multi-head causal self-attention,
+transformer blocks, and the language-modeling head.
 
- Students should implement the TODO sections in each class and function.
 """
 
 import os
@@ -68,7 +67,6 @@ class GPTEmbedding(nn.Module):
         super().__init__()
 
         ###########################################################################
-        #                            TODO 1.1: YOUR CODE HERE                         #
         #                                                                         #
         # 1. Create an embedding layer for tokens (token IDs from the tokenizer). #
         # 2. Note: We don't need positional embeddings since we use RoPE!        #
@@ -86,7 +84,6 @@ class GPTEmbedding(nn.Module):
             token embeddings: Tensor of shape (batch_size, seq_length, hidden_dim)
         """
         ###########################################################################
-        #                            TODO 1.2: YOUR CODE HERE                         #
         #                                                                         #
         # 1. Obtain token embeddings from the token embedding layer.              #
         # 2. Return the token embeddings (no positional embeddings needed!)       #
@@ -121,7 +118,6 @@ class MultiHeadAttention(nn.Module):
         super().__init__()
 
         ########################################################################################################################
-        #                                                     TODO 1.3: YOUR CODE HERE                                             #
         #                                                                                                                      #
         # 1. Figure out how many dimensions each head should have                                                              #
         # 2. Create linear layers to turn the input embeddings into the query, key, and value projections                      #
@@ -204,7 +200,6 @@ class MultiHeadAttention(nn.Module):
             Output embeddings of shape (batch_size, seq_length, d_out)
         """
         #################################################################################################################################
-        #                                                   TODO 1.4: YOUR CODE HERE                                                        #
         #                                                                                                                               #
         # Implement multi-headed attention with RoPE:                                                                                   #
         #                                                                                                                               #
@@ -317,7 +312,6 @@ class FeedForward(nn.Module):
         super().__init__()
 
         ################################################################
-        #                     TODO 1.5: YOUR CODE HERE                     #
         # Implement the layers for the SwiGLU FFN:                     #
         #   1) Calculate the hidden dimension 'd_ff'. This dimension   #
         #      is (expansion * emb_dim).                               #
@@ -350,7 +344,6 @@ class FeedForward(nn.Module):
             Output tensor of shape [..., D]
         """
         ################################################################
-        #                     TODO 1.6: YOUR CODE HERE                     #
         # Implement the forward pass for SwiGLU:                       #
         #   1) Pass the input 'x' through 'self.fc1'.                  #
         #   2) 'Chunk' the result from fc1 into two separate tensors   #
@@ -395,7 +388,6 @@ class TransformerBlock(nn.Module):
         super().__init__()
 
         ################################################################
-        #                     TODO 1.7: YOUR CODE HERE                 #
         # Implement a *decoder-style* Transformer block for GPT with   #
         # pre-norm + residual connections.                             #
         #                                                              #
@@ -430,7 +422,6 @@ class TransformerBlock(nn.Module):
             Tensor with dropout applied (if enabled)
         """
         ################################################################
-        #                     TODO 1.8: YOUR CODE HERE                     #
         # Apply dropout if dropout_p > 0.                              #
         # - Use nn.functional.dropout(x, p=self.dropout_p,             #
         #   training=self.training)                                    #
@@ -451,7 +442,6 @@ class TransformerBlock(nn.Module):
             Output hidden states of shape [B, T, D]
         """
         ################################################################
-        #                     TODO 1.9: YOUR CODE HERE                     #
         # Implement forward pass (pre-norm residual block):            #
         #                                                              #
         # 1. Attention sub-layer (pre-norm + residual):                #
@@ -504,7 +494,6 @@ class GPTModel(nn.Module):
         self.context_length = cfg['context_length']
 
         ################################################################
-        #                     TODO 1.10: YOUR CODE HERE                #
         # Build the GPT model components:                              #
         # 1) Use the embedding layer (token embeddings only)           #
         # 2) Dropout after embedding                                   #
@@ -547,7 +536,6 @@ class GPTModel(nn.Module):
             raise ValueError(f"Sequence length {T} exceeds context_length {self.context_length}")
 
         ################################################################
-        #                     TODO 1.11: YOUR CODE HERE                     #
         # Forward pass:                                                #
         # 1) Embed the inputs (token embeddings only)                  #
         # 2) Apply dropout                                             #
@@ -654,7 +642,6 @@ class GPTDataset(Dataset):
             stride: Step size for sliding window
         """
         ################################################################
-        #                     TODO 1.12: YOUR CODE HERE                     #
         # Goal: Build input/target pairs for next-token prediction.    #
         #                                                              #
         # 1) Store args (tokenizer, max_length, stride).               #
@@ -708,7 +695,6 @@ class GPTDataset(Dataset):
             Tuple of (input_ids, target_ids)
         """
         ################################################################
-        #                     TODO 1.13: YOUR CODE HERE                     #
         # Return the input and target tensors for the given index      #
         ################################################################
         i = self.window_starts[idx]
@@ -781,7 +767,6 @@ def create_dataloader(txt=None, arrow_dataset_path=None, batch_size=16, max_leng
         DataLoader instance
     """
     ################################################################
-    #                     TODO 1.14: YOUR CODE HERE                     #
     # 1) Check if arrow_dataset_path is provided (Arrow format)     #
     # 2) If Arrow format:                                          #
     #    - Create GPTArrowDataset with arrow_dataset_path          #
@@ -859,7 +844,6 @@ def setup_tokenizer():
     Returns the configured tokenizer.
     """
     ###########################################################################
-    #                            TODO 1.15: YOUR CODE HERE                    #
     #                                                                         #
     # Implement tokenizer setup:                                              #
     #                                                                         #

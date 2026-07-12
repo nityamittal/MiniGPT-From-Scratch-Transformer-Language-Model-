@@ -1,10 +1,10 @@
 """
-EECS 595 HW3: Supervised Fine-Tuning (SFT) Implementation
+Supervised fine-tuning (SFT) components for chat-style training.
 
-This file contains all the core classes and functions needed to implement
-Supervised Fine-Tuning (SFT) of GPT models for conversational AI.
+Dataset classes for multi-turn conversations, role formatting
+(system / user / assistant), and loss masking so the objective applies
+only to assistant tokens.
 
-Students should implement the TODO sections in each class and function.
 """
 
 import os
@@ -113,7 +113,6 @@ class SFTDataset(Dataset):
             Tuple of (input_ids, labels) tensors
         """
         ###########################################################################
-        #                            TODO 3.1: YOUR CODE HERE                         #
         #                                                                         #
         # Implement fast tokenization with selective masking:                    #
         #                                                                         #
@@ -205,7 +204,6 @@ def sft_data_collator(batch, pad_token_id: int = 0):
         Dictionary with batched input_ids and labels
     """
     ###########################################################################
-    #                            TODO 3.2: YOUR CODE HERE                         #
     #                                                                         #
     # Implement SFT data collator for batching:                               #
     #                                                                         #
@@ -310,7 +308,6 @@ def generate_chat_response(model, tokenizer, user_message, max_new_tokens=100, t
         Generated response text
     """
     ##############################################################################
-    #                            TODO 3.3: YOUR CODE HERE                        #
     #                                                                            #
     # Implement conversational text generation:                                  #
     #                                                                            #
@@ -489,7 +486,6 @@ def evaluate_validation_loss(model, val_loader, loss_fn, device):
         Average validation loss
     """
     ###########################################################################
-    #                            TODO 3.4: YOUR CODE HERE                     #
     #                                                                         #
     # Implement validation loss evaluation for SFT:                           #
     #                                                                         #
@@ -607,7 +603,6 @@ def create_sft_dataloader(data_file: str, tokenizer, batch_size: int = 16,
         DataLoader instance
     """
     ###########################################################################
-    #                            TODO 3.5: YOUR CODE HERE                     #
     #                                                                         #
     # Implement SFT DataLoader creation:                                      #
     #                                                                         #
