@@ -1,8 +1,6 @@
 """
-EECS 595 HW3: SFT Training Script
+SFT training loop: fine-tunes a pretrained GPT checkpoint on conversation data.
 
-This script contains the complete training loop for supervised fine-tuning (SFT) of GPT models.
-Students need to implement the core components in sft.py before running this script.
 
 Usage:
     python sft_gpt.py
@@ -13,12 +11,10 @@ The script will:
 3. Fine-tune the model with masked loss computation
 4. Save checkpoints and log to wandb
 
-TODO: Students need to implement the following components in sft.py:
-- SFTDataset: Load and format conversational data with proper token masking
-- SFTDatasetFast: Fast tokenization version for better performance
-- Data collators: Handle batching for SFT training
-- Generation functions: Conversational text generation
-- Utility functions: Model loading and validation
+Depends on the components implemented in sft.py:
+- SFTDataset / SFTDatasetFast: load and format conversational data with loss masking
+- Data collators for SFT batching
+- Generation and model-loading utilities
 """
 
 import os
@@ -201,7 +197,6 @@ def create_dataloaders(args, tokenizer):
     print("Creating dataloaders...")
 
     ###########################################################################
-    #                            TODO 4.1: YOUR CODE HERE                     #
     #                                                                         #
     # Implement SFT DataLoader creation:                                      #
     #                                                                         #
@@ -318,7 +313,6 @@ def train_model(model, train_loader, val_loader, args, device):
         for batch_idx, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
 
             ###########################################################################
-            #                            TODO 4.2: YOUR CODE HERE                     #
             #                                                                         #
             # Implement SFT forward pass:                                             #
             #                                                                         #
@@ -386,7 +380,6 @@ def train_model(model, train_loader, val_loader, args, device):
 
 
             ###########################################################################
-            #                            TODO 4.3: YOUR CODE HERE                     #
             #                                                                         #
             # Implement SFT backward pass and optimization:                           #
             #                                                                         #
@@ -547,7 +540,6 @@ def main():
     config = create_model_config(args, vocab_size)
 
     ###########################################################################
-    #                            TODO 4.4: YOUR CODE HERE                     #
     #                                                                         #
     # Implement model loading and setup:                                      #
     #                                                                         #

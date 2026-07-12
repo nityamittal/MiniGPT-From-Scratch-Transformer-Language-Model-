@@ -87,3 +87,20 @@ Install (example):
 
 ```bash
 pip install torch datasets tokenizers wandb tqdm
+```
+
+---
+
+## Pretrained Artifacts
+
+Model checkpoints and the tokenized training data are hosted on Google Drive
+(too large for git):
+
+- **Model checkpoints:** https://drive.google.com/drive/folders/11JrmxAUYGynGHVFb_AhhyrAFQp_IVfNZ?usp=sharing
+- **Training dataset:** https://drive.google.com/drive/folders/1hkoJ4LVguxVUSwXBLa6TBIwFgqM3ABxs?usp=drive_link
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).

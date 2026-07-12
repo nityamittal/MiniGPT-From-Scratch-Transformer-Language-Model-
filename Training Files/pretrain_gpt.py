@@ -1,8 +1,6 @@
 """
-EECS 595 HW3: GPT Pretraining Script
+Causal language-model pretraining loop for the GPT model in gpt.py.
 
-This script contains the complete training loop for pretraining a GPT model.
-Students need to implement the core components in gpt.py before running this script.
 
 Usage:
     python pretrain_gpt.py
@@ -14,14 +12,11 @@ The script will:
 4. Train the model with mixed precision
 5. Save checkpoints and log to wandb
 
-TODO: Students need to implement the following components in gpt.py:
-- GPTEmbedding: Token embeddings (no positional embeddings needed)
-- MultiHeadAttention: Attention mechanism with RoPE
-- SwiGLU: Modern activation function
-- FeedForward: Position-wise MLP
-- TransformerBlock: Combines attention and MLP
-- GPTModel: Complete GPT model
-- Dataset classes: Data loading utilities
+Depends on the components implemented in gpt.py:
+- GPTEmbedding: token embeddings (RoPE supplies position information)
+- MultiHeadAttention: attention mechanism with RoPE
+- SwiGLU / FeedForward: position-wise MLP
+- TransformerBlock, GPTModel, and dataset classes
 """
 
 import os
@@ -221,7 +216,6 @@ def create_dataloaders(docs, tokenizer, config, args):
     print("Creating dataloaders...")
 
     ###########################################################################
-    #                            TODO 2.1: YOUR CODE HERE                         #
     #                                                                         #
     # Implement dataloader creation for training:                           #
     #                                                                         #
@@ -319,7 +313,6 @@ def evaluate_validation_loss(model, val_loader, loss_fn, device, max_docs=None):
         max_docs: Maximum number of validation batches to process (None = use all)
     """
     ###########################################################################
-    #                            TODO 2.2: YOUR CODE HERE                     #
     #                                                                         #
     # Implement validation loss evaluation:                                   #
     #                                                                         #
@@ -521,10 +514,7 @@ def train_model(model, train_loader, val_loader, config, args, resume_state=None
 
 
     ###########################################################################
-    #                            TODO 2.3: YOUR CODE HERE                         #
-    #
-    # Students need to implement the core training loop
-    # This involves:
+    # Core training loop:
     # 1. Computing gradients with loss.backward() (scaled by accumulation factor)
     # 2. Gradient clipping to prevent exploding gradients
     # 3. Optimizer step to update parameters (only every 'accum' steps)
@@ -743,7 +733,6 @@ def main():
     print(f"Using device (for compile): {device}")
 
     ###########################################################################
-    #                            TODO 2.4: YOUR CODE HERE                     #
     #                                                                         #
     # Implement model initialization and setup:                               #
     #                                                                         #
